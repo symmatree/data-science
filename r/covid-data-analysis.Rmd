@@ -1,0 +1,485 @@
+---
+title: "Covid-19 Dataset Analysis"
+author: "Seth Porter"
+date: '2022-04-16'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This report analyses a Johns Hopkins-sourced dataset to examine the correlations
+between COVID-19 impact and socio-economic metrics.
+
+## Data Sources
+
+The primary data source for this analysis is from the
+COVID-19 Data Repository by the Center for Systems Science and Engineering
+(CSSE) at Johns Hopkins University, as published on Github:
+<https://github.com/CSSEGISandData/COVID-19>. The original dataset was described
+in 
+Dong, Du, and Gardner, "An interactive web-based dashboard to track COVID-19 in real time", 
+The Lancet 20.5 (2020) P533-534.
+
+We enrich this data with income, poverty and population data from secondary
+datasets:
+
+* Small Area Income and Poverty Estimates (SAIPE) Program from the US Census <https://www.census.gov/programs-surveys/saipe.html>
+* County population estimates from the US Census' 
+  Population Estimates Program (PEP) <https://www.census.gov/programs-surveys/popest.html> 
+
+Specific data products are referenced in the Data Import and Tidying section,
+following.
+
+
+# Data Import and Tidying
+
+This section covers our data sources and the process of importing, tidying, 
+and joining them together. Readers uninterested in the details of the process
+may skip to the Analysis heading.
+
+## Setup and Dependencies
+
+First, we import a number of libraries we will need.
+
+```{r dependencies}
+# Tidyverse and sub-projects
+library(tidyverse)
+library(lubridate)
+library(readxl)
+library(stringr)
+
+## https://cran.r-project.org/web/packages/ggcorrplot/readme/README.html
+library(ggcorrplot)
+# if this fails, please install with `install.packages("ggcorrplot")` in the console
+```
+
+## Daily Covid Reports: Import and Tidying
+
+For a current snapshot, we use the `csse_covid_19_daily_reports` described
+in <https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data#daily-reports-csse_covid_19_daily_reports>;
+specifically the report from April 1, 2022 downloaded from
+<https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/04-01-2022.csv>.
+
+```{r import_april_data}
+snapshot_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/04-01-2022.csv"
+daily_04_01_raw <- read_csv(snapshot_url, show_col_types = FALSE)
+us_daily <- daily_04_01_raw %>%
+  # Select only US records (FIPS is US-only)
+  filter(!is.na(FIPS)) %>%
+  # Prune certain cruise ships and non-state territories
+  filter(!is.na(Admin2)) %>%
+  select(c(FIPS, Admin2, Province_State, Confirmed, Deaths)) %>%
+  mutate(
+    FIPS=str_pad(FIPS, 5, pad="0")
+    ) %>%
+  rename(State=Province_State, County=Admin2)
+```
+
+Note that we only preserve Confirmed Cases and Deaths. The remaining metrics
+are either sporadically-updated (if at all), or in the case of `Incident_Rate`
+they are based on a population estimate and we will be supplying our own (below).
+This forces consistency (since Johns Hopkins does not provide a Death Rate metric,
+we cannot rely exclusively on their population computations).
+
+
+## Poverty / Income: Import and Tidying
+
+We use a US Census data product to provide median income and poverty-level
+estimates on a county level. This is a modeled dataset based on several
+indicators to provide a consistent product across the country.
+
+* Overall docs <https://www.census.gov/programs-surveys/saipe.html>
+* Specific product: "SAIPE State and County Estimates for 2020" <https://www.census.gov/data/datasets/2020/demo/saipe/2020-state-and-county.html>
+* Field-level documentation <https://www2.census.gov/programs-surveys/saipe/technical-documentation/file-layouts/state-county/2020-estimate-layout.txt>
+* Dataset URL <https://www2.census.gov/programs-surveys/saipe/datasets/2020/2020-state-and-county/est20all.xls>
+
+Unlike the Covid data, separate FIPS fields are present for state and county,
+so must be combined into a single field before the datasets can be joined.
+
+```{r import_poverty}
+if(!file.exists("Data")){dir.create("Data")}
+poverty_url <- "https://www2.census.gov/programs-surveys/saipe/datasets/2020/2020-state-and-county/est20all.xls"
+poverty_file <- "Data/saipe-est20all.xls"
+if(!file.exists(poverty_file)) {download.file(poverty_url, poverty_file, mode="wb")}
+poverty <- read_excel(poverty_file, range="A4:Y3199", .name_repair = "universal", ) %>%
+  # Keep the various names for diagnostics
+  select(c(State.FIPS.Code, County.FIPS.Code, Postal.Code, Name,
+           Poverty.Estimate..All.Ages,
+           Median.Household.Income,
+           )) %>%
+  mutate(Postal.Code=factor(Postal.Code),
+         FIPS=paste0(State.FIPS.Code, County.FIPS.Code),
+         Poverty.Estimate..All.Ages=as.numeric(Poverty.Estimate..All.Ages),
+         Median.Household.Income=as.numeric(Median.Household.Income)) %>%
+  rename(
+    PovertyCount=Poverty.Estimate..All.Ages) %>%
+  # Prune state-level aggregates
+  filter(County.FIPS.Code != "000") %>%
+  select(-c(State.FIPS.Code, County.FIPS.Code))
+```
+Note that we retain only the Median Income and the count of people below the
+poverty line; we will derive per-capita values using a consistent population
+estimate, below.
+
+We see NA values in this dataset; let us examine them:
+
+```{r poverty_na}
+poverty %>%
+  filter(is.na(PovertyCount) | is.na(Median.Household.Income)) %>%
+  select(c(Postal.Code, Name))
+```
+
+This is the smallest county in the United States, per
+<https://en.wikipedia.org/wiki/Kalawao_County,_Hawaii>, and the second-smallest
+population, so it is plausible that the Census does not have a good estimate.
+We can safely drop this single datapoint:
+
+```{r poverty_drop_na}
+poverty <- poverty %>% filter(!is.na(PovertyCount) &
+                                !is.na(Median.Household.Income))
+```
+
+### Unmatched Records
+
+Before proceeding with combined analysis, we must examine the records which
+cannot be joined, and confirm that it is acceptable to disregard them.
+
+Considering first the records which are present in the Covid dataset but
+not the poverty dataset:
+
+```{r covid_not_poverty}
+covid_not_poverty <- us_daily %>%
+  left_join(poverty, by="FIPS") %>%
+  filter(is.na(Median.Household.Income))
+covid_not_poverty_totals <- covid_not_poverty %>%
+  summarize(total_deaths=sum(Deaths), total_cases=sum(Confirmed))
+print(paste0("Covid records without poverty estimates:",
+             nrow(covid_not_poverty), " of which:"))
+print(paste0("'Unassigned' records: ",
+             nrow(covid_not_poverty %>% filter(County=="Unassigned"))))
+covid_not_poverty <- covid_not_poverty %>%
+  filter(County != "Unassigned")
+print(paste0("Out of state records: ",
+             nrow(covid_not_poverty %>% filter(str_detect(County, "Out of")))))
+covid_not_poverty <- covid_not_poverty %>%
+  filter(!str_detect(County, "Out of"))
+print(paste0("Puerto Rico records: ",
+             nrow(covid_not_poverty %>% filter(State=="Puerto Rico"))))
+covid_not_poverty <- covid_not_poverty %>%
+  filter(State != "Puerto Rico")
+print(paste0(covid_not_poverty$County, covid_not_poverty$State))
+us_totals <- us_daily %>%
+  summarize(total_deaths=sum(Deaths), total_cases=sum(Confirmed))
+print(paste0("Unmatched death fraction: ",
+             covid_not_poverty_totals$total_deaths / us_totals$total_deaths))
+print(paste0("Unmatched case fraction: ",
+             covid_not_poverty_totals$total_cases / us_totals$total_cases))
+```
+
+We see that Of the 145 such records:
+
+* each state has one "Unassigned" row for cases and deaths
+  which could not be localized
+* 15 states report out-of-state cases as well as internal ones
+* Puerto Rico has 78 records which it is a shame to ignore (Puerto Rico is
+  chronically forgotten!) but whose omission is perhaps understandable in a
+  "state"-oriented dataset like SAIPE
+* 1 record for Valdez-Cordova census Area in Alaska, which is reported in
+  Wikipedia to have been abolished in 2019: <https://en.wikipedia.org/wiki/Valdez%E2%80%93Cordova_Census_Area,_Alaska>
+
+In total, these records account for 1.2% each of total US deaths and confirmed
+cases, so it is reasonable to disregard them.
+
+Considering the opposite, locations present in the poverty data but not the
+covid data:
+
+```{r poverty_not_covid}
+us_daily %>%
+  right_join(poverty, by="FIPS") %>%
+  # County comes from the covid dataset
+  filter(is.na(County)) %>%
+  select(c(Postal.Code, Name)) %>%
+  count(Postal.Code)
+```
+
+We find one county each in Alaska, Hawaii, 2 in Massachusetts, and 22 in Utah.
+Per a Johns Hopkins FAQ <https://coronavirus.jhu.edu/us-map-faq>,
+"Utah is reporting county data somewhat differently than many other states. The larger-population counties are reporting confirmed cases and deaths at the county level. However, the smaller counties are banded together into county groups. This is in an effort to protect identities of individuals."
+
+Overall, this is a small number of records, primarily in low-population
+counties, and we will disregard them for this analysis.
+
+```{r join_covid_poverty}
+us_daily_poverty <- us_daily %>%
+  inner_join(poverty, by="FIPS") %>%
+  select(-c(Postal.Code, Name))
+```
+
+## County Populations
+
+The Johns Hopkins dataset only reports deaths as total counts, not scaled by
+population. To compare death rates across the country, we must join against
+a population data source. In this analysis we use the US Census Population
+and Housing Unit Estimates <https://www.census.gov/programs-surveys/popest.html>,
+in particular the 2021 vintage population estimates: <https://www2.census.gov/programs-surveys/popest/datasets/2020-2021/counties/totals/co-est2021-alldata.csv>
+which has fields described at <https://www2.census.gov/programs-surveys/popest/technical-documentation/file-layouts/2020-2021/CO-EST2021-ALLDATA.pdf>
+
+```{r population_import}
+pop_url <- "https://www2.census.gov/programs-surveys/popest/datasets/2020-2021/counties/totals/co-est2021-alldata.csv"
+raw_pop <- read_csv(pop_url, show_col_types=FALSE)
+population <- raw_pop %>%
+  # County-level summaries
+  filter(SUMLEV=="050") %>%
+  mutate(FIPS=paste0(STATE, COUNTY)) %>%
+  select(c(FIPS, POPESTIMATE2021, STNAME, CTYNAME))
+```
+
+### Unmatched Population
+
+We perform the same data-matching tests for population data as we did for
+poverty. Starting with records in the population dataset but not the joined
+Covid data:
+
+```{r pop_not_covid}
+population %>%
+  left_join(us_daily_poverty, by="FIPS") %>%
+  filter(is.na(County)) %>%
+  count(STNAME)
+```
+This is the now-familiar list of counties that provide aggregated Covid
+reporting.
+
+Considering the rows in the joined Covid/Poverty dataset (that is, after
+discarding the Covid records not found in the poverty data):
+
+```{r covid_not_pop}
+print(paste0("Unmatched Covid records: ", nrow(population %>%
+  right_join(us_daily_poverty, by="FIPS") %>%
+  filter(is.na(STNAME)))))
+```
+there are no further exceptions, so we can safely join the population data.
+
+```{r join_pop}
+us_daily_full <- us_daily_poverty %>%
+  left_join(population, by="FIPS") %>%
+  select(-c(STNAME, CTYNAME)) %>%
+  rename(Population=POPESTIMATE2021)
+```
+
+## Missing Data
+
+# Analysis
+
+## Per Capita Computations
+
+Before beginning work, we will compute per-capita values for Cases, Deaths,
+and Poverty:
+
+```{r per_cap}
+us_daily_full <- us_daily_full %>%
+  mutate(CasesPerCap = Confirmed / Population,
+         DeathsPerCap = Deaths / Population,
+         PovertyPerCap = PovertyCount / Population)
+```
+
+## Summary
+
+Let us consider basic descriptive statistics for the joined dataset, focusing
+on the columns we will use in our analysis:
+
+
+```{r summary}
+summary(us_daily_full %>%
+          select(-c(FIPS, County, State, Confirmed, Deaths, PovertyCount)))
+```
+
+These values seem plausible with the possible exception of the 3 cases-per-person
+maximum, which we can examine in more detail:
+
+```{r outliers}
+# Wrap this as a function; we want to do this a lot, but keep it explicit.
+# I can't figure out how to take non-strings as "column" but that's okay.
+filter_percentile <- function(data, column, min_quant, max_quant) {
+  bounds = quantile(data[[column]], c(min_quant, max_quant))
+  return(
+    data %>% filter(
+      (!!sym(column) > bounds[1]) &
+      (!!sym(column) <= bounds[2]))
+  )
+}
+
+us_daily_full %>% filter_percentile("CasesPerCap", 0.999, 1.0)
+
+```
+
+The extreme value, 3.0 Cases per capita, is in the lowest-population county
+in the country (Loving County, TX). The small denominator magnifies the
+underlying signal, which may be partly reinfection but also likely includes
+transient workers being diagnosed while in the county. This highlights a
+difference in definition between the "population of this county" and "people
+whose disease or death would be recorded in this county".
+
+## Pair-wise Analysis
+
+We begin by taking our two measures of Covid impact (cases and deaths), and
+our two socioeconomic indicators (median income and population below the poverty
+line), and comparing them.
+
+Considering the pairwise correlation matrix:
+
+```{r corr_matrix}
+pairwise <- us_daily_full %>%
+  select(Median.Household.Income, PovertyPerCap, CasesPerCap, DeathsPerCap) %>%
+  cor()
+disp_pairwise <- round(pairwise, 1)
+
+disp_pairwise
+```
+```{r corr_plot}
+ggcorrplot(pairwise)
+```
+
+Examining these correlations, we see that Poverty Per Capita and the median
+household income of a county are quite closely related (corr=-0.8).
+
+Interestingly, Cases Per Capita is only weakly related to *any* of the
+factors including deaths. It is quite weakly correlated (in the expected way) with
+poverty and income. It is more correlated with Deaths per Capita (which seems
+reasonable, if a death is necessarily also a case), but only a correlation of
+0.3.
+
+By contrast, *Deaths* per capita is the best cross-category (disease and
+socioeconomic) correlation at 0.5 or -0.5, equally strong for either poverty
+or income.
+
+### Poverty and Deaths
+
+Choosing the (poverty, death) pair somewhat arbitrarily, we can fit a linear
+model:
+
+```{r Poverty_v_Death}
+
+deaths_from_poverty = lm(DeathsPerCap ~ PovertyPerCap, us_daily_full)
+summary(deaths_from_poverty)
+paste0("Correlation: ",
+       cor(us_daily_full$DeathsPerCap, us_daily_full$PovertyPerCap))
+```
+and plot a 2d histogram of these features against each other:
+
+```{r cases_per_cap}
+us_daily_full %>%
+  filter_percentile("DeathsPerCap", 0.01, 0.99) %>%
+  filter_percentile("PovertyPerCap", 0.01, 0.99) %>%
+  ggplot(aes(x=PovertyPerCap, DeathsPerCap)) +
+    geom_bin_2d(bins=50) +
+    geom_abline(slope=coefficients(deaths_from_poverty)["PovertyPerCap"],
+                intercept=coefficients(deaths_from_poverty)["(Intercept)"],
+                color="red")
+```
+
+The slope appears too shallow, visually, but this is an illusion. Among other
+stability tests, the slope is almost the same if computed on the trimmed data,
+so the fit is not dominated by the extreme values.
+
+## Many-way
+
+Quite honestly, predicting death from poverty is likely the most practical
+use case, as poverty information may be known in advance and could be used to
+predict, whereas case counts are contemporaneous with deaths. However, in some
+scenarios (perhaps a loss of the ability to collect death data reliably) it
+could be useful to predict deaths from all three other features.
+
+Fitting a simple linear model, predicting deaths as a sum of three linear
+components and an intercept:
+
+```{r big_model}
+deaths_from_all = lm(DeathsPerCap ~ PovertyPerCap +
+                       CasesPerCap + Median.Household.Income, us_daily_full)
+summary(deaths_from_all)
+```
+
+we get R^2 up to 0.34 which is a mild improvement. The scales of the features
+are incommensurate so we cannot interpret coefficients directly as importance.
+
+## Z-scoring for comparable feature scales
+
+If we normalize the columns by z-scoring them we get coefficients which can
+be interpreted as feature importance:
+
+```{r z_score}
+z_score <- function(column) {
+  m = mean(column)
+  s = sd(column)
+  return((column-m)/s)
+}
+
+z_scored <- us_daily_full %>%
+  mutate(
+    ZPoverty=z_score(PovertyPerCap),
+    ZIncome=z_score(Median.Household.Income),
+    ZCases=z_score(CasesPerCap),
+    ZDeaths=z_score(DeathsPerCap)
+  )
+deaths_from_z = lm(ZDeaths ~ ZPoverty +
+                       ZCases + ZIncome, z_scored)
+summary(deaths_from_z)
+print("Coefficients rescaled to deaths-per-capita:")
+print(sd(us_daily_full$DeathsPerCap) * coefficients(deaths_from_z))
+print(paste0("Std Dev of income: ", sd(us_daily_full$Median.Household.Income)))
+```
+We see that an increase of one standard deviation in median household income,
+or $14,580, in a county is associated with a decrease of 0.0006
+deaths-per-capita, while a one standard deviation increase in cases per capita
+leads to a slightly smaller increase of 0.0004.
+
+
+# Conclusions
+
+## Primary Conclusions
+
+Based on these three datasets, it appears that the frequency of Covid cases is
+largely independent of socioeconomic factors, but the *outcomes* of those
+infections, in terms of deaths, are highly influenced by poverty. In fact
+the level of poverty is more influential than the number of cases in a county!
+
+## Bias and Errors
+
+There are many ways that these conclusions could be incorrect, in both the
+underlying data and the analysis presented here.
+
+* There may be systematic variation in the fidelity of case or death reporting
+in different areas; note that high rates of reporting would confound with high
+underlying signal.
+* The population and socioeconomic data are not perfectly
+aligned in time with the case data, and might in some cases reflect the
+consequences of the disease data rather than causes.
+* There are modeling components in both the population and the socioeconomic
+metrics; assumptions from that level might bleed through and appear as a
+signal in this analysis.
+* Considering only the accumulated case and death counts at a single point in
+time allows a simpler analysis, but ignores differences in the rates and
+trends over time. Cases concentrated in spikes can have a sharply worse impact
+than the same total load distributed over time; aggregate case or death
+count does not reflect that temporal distribution.
+* This analysis discarded several categories of unattributed or aggregated case
+and death counts. Those were small fractions of the overall totals, but could
+be systematically concentrated in certain areas. Locally this could lead to
+an incorrect conclusion about a particular county or area.
+
+All of these scenarios are likely true to at least some degree; the question
+is whether any of them is so common in the data that it leads us to incorrect
+conclusions or some systemic error in our models. Future analysis could rule
+many of these out, by considering stability across multiple snapshots, testing
+with other data sources, and otherwise reducing the risk that these conclusions
+are due to some one-off occurrence in this particular dataset.
+
+
+# Appendix: Session Info
+
+```{r sessioninfo}
+sessionInfo()
+```
