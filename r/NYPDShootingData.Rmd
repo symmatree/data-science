@@ -1,0 +1,1213 @@
+---
+title: "NYPD Shooting Data Analysis"
+author: "Seth Porter"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 4
+  html_document:
+    toc: true
+    toc_depth: 4
+date: '2022-04-04'
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r dependencies}
+library(conflicted)
+
+# Tidyverse and sub-projects
+library(tidyverse)
+# if this fails, please install with `install.packages("tidyverse")` in the console
+library(lubridate)
+
+# The new fancy error messages breaks LaTeX rendering at least on
+# my machine, so avoid it.
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+
+```
+
+# Overview
+
+This analysis considers a historical dataset of shooting incidents in New
+York City, as reported by the NYPD. 
+
+Shooting incidents are extreme events which can end or radically change the
+lives of both the victim and the shooter in a single action. Understanding their
+patterns is crucial to policy and intervention decisions
+from law enforcement, other city agencies, and non-governmental actors.
+
+## Where is the data from?
+
+The dataset is sourced from
+<https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic>,
+with interpretation footnotes at <https://bit.ly/3KSLRjA>. It is described as
+a "List of every shooting incident that occurred in NYC going back to 2006
+through the end of the previous calendar year."
+
+It also clarifies that a shooting with no injuries is not included: "Only valid
+shooting incidents resulting in an injured victim are included in this
+release."
+
+Be cautious; this data is from a law enforcement agency reporting on its own
+jurisdiction, and may have obvious
+as well as unexpected biases or gaps in the collection and reporting process.
+
+## Secondary data sources
+
+In addition to the primary data, some secondary sources are used to
+contextualize or suggest possible causal variables:
+
+* Central Park temperature data from <https://www.weather.gov/media/okx/Climate/CentralPark/DailyAvgTNormals.pdf>
+* Population data from <https://www.census.gov/quickfacts/newyorkcitynewyork>
+
+## Self-link and Source
+
+This document is derived from an R Markdown notebook, with source available in
+Github repo: <https://github.com/symmatree/data-science/tree/main/r>:
+
+* This document's source code: <https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.Rmd>
+* This document rendered as a PDF: <<https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.pdf>
+* A slide deck summarizing the conclusions of this analysis, eliding discussion
+  of the details of data cleaning and other "methods" topics:
+  <https://github.com/symmatree/data-science/raw/main/r/nypd_slices.Rmd> (source) /
+  <https://github.com/symmatree/data-science/raw/main/r/nypd_slices.pptx> (rendered)
+
+# Import
+
+The first step in analysis is to import the data. In this case we read
+from
+<https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic>:
+
+```{r import}
+url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+raw_incidents <- read_csv(url)
+```
+
+# Tidy
+
+Some fields need to be converted appropriately. Refer to
+<https://data.cityofnewyork.us/api/views/833y-fsy8/files/e4e3d86c-348f-4a16-a17f-19480c089429?download=true&filename=NYPD_Shootings_Incident_Level_Data_Footnotes.pdf>
+for background on the dataset.
+
+## Dates
+
+## Missing Values
+
+> Null values may also appear in instances where information was not
+> available or unknown at the time of the report and should be
+> considered as either "Unknown/Not Available/Not Reported."
+
+```{r raw_missingness}
+summary(is.na(raw_incidents))
+```
+
+Several fields have substantial levels of missingness (TRUE counts in
+the table above): `LOCATION_DESC`, `PERP_{AGE_GROUP,SEX,RACE}`. In
+addition, `JURISDICTION_CODE` has two missing values.
+
+The high missingness fields all have explicit values for "unknown":
+
+-   `LOCATION_DESC` has a `NONE` level
+-   `PERP_AGE` has `UNKNOWN`
+-   `PERP_SEX` has `U`
+-   `PERP_RACE` has `UNKNOWN`
+
+so we can collapse the NA values onto these enums. `JURISDICTION_CODE`
+does **not** have this explicit encoding for missingness, but only two
+values are NA. These records appear unexceptional, and we will simply
+discard them.
+
+(An alternative would be to infer the majority class, `Patrol`).
+
+```{r missing_jurisdiction, include=FALSE}
+# View the two records; doesn't knit well, though fine interactively.
+raw_incidents %>% filter(is.na(JURISDICTION_CODE))
+```
+
+## Locations
+
+There are several concerns about the geolocation fields (various police
+stations and prisons are used as placeholder values, among other
+things). For the moment, discard these fields and focus on the
+categorical data.
+
+Exploring the geolocation of shootings, and correlating against the
+other variables, is an entire analysis of its own.
+
+## Jurisdiction
+
+Per the dataset description:
+
+> `JURISDICTION_CODE`: Jurisdiction where the shooting incident
+> occurred. Jurisdiction codes 0(Patrol), 1(Transit) and 2(Housing)
+> represent NYPD whilst codes 3 and more represent non NYPD
+> jurisdictions
+
+We can recode the jurisdiction integers with human-readable values.
+
+## PERP_AGE_GROUP bad values
+
+PERP_AGE_GROUP has some bad values (1020, 224, and 940):
+
+```{r demonstrate_PERP_AGE_GROUP}
+raw_incidents %>% count(PERP_AGE_GROUP, sort=TRUE)
+```
+
+## Categorical fields
+
+Most of the string fields are actually categorical and should be
+converted to factors once their values are cleaned up:
+
+-   PERP and VIC versions of:
+    -   gender ('SEX')
+    -   RACE
+    -   AGE_GROUP
+-   BORO
+-   PRECINCT is categorical though it looks like a number (police
+    precincts are numbered but are nominal not ordinal data, similar to
+    zip codes). However, we will discard it from this analysis because
+    it cannot be well analyzed without considering geolocation data, because
+    the effect of the institution of the precinct itself is inherently
+    confounded with the local environment.
+-   LOCATION_DESC is a category with 39 distinct values
+
+## Execute tidying
+
+```{r tidy}
+gender_levels <- c("M", "F", "U")
+# Use the data to generate these lists, the values are long and messy
+race_levels <- levels(factor(raw_incidents$VIC_RACE))
+# PERP_AGE_GROUP has some values that VIC_AGE_GROUP doesn't, but they're bad.
+age_levels = levels(factor(raw_incidents$VIC_AGE_GROUP))
+boro_levels <- c( "BRONX", "BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND")
+# use parse_factor to warn if we get unexpected values
+incidents <- raw_incidents %>%
+    filter(!is.na(JURISDICTION_CODE)) %>%
+    mutate(OCCUR_DATE=mdy(OCCUR_DATE),
+           LOCATION_DESC=replace_na(LOCATION_DESC, "NONE"),
+           PERP_RACE=replace_na(PERP_RACE, "UNKNOWN"),
+           PERP_AGE_GROUP=replace_na(PERP_AGE_GROUP, "UNKNOWN"),
+           PERP_SEX=replace_na(PERP_SEX, "U")) %>%
+    mutate(PERP_AGE_GROUP=recode(PERP_AGE_GROUP,
+           "1020"= "UNKNOWN",
+           "224" = "UNKNOWN",
+           "940" = "UNKNOWN")) %>%
+    mutate(PERP_SEX=parse_factor(PERP_SEX, levels=gender_levels),
+           VIC_SEX=parse_factor(VIC_SEX, levels=gender_levels),
+           PERP_RACE=parse_factor(PERP_RACE, levels=race_levels),
+           VIC_RACE=parse_factor(VIC_RACE, levels=race_levels),
+           BORO=parse_factor(BORO, levels=boro_levels),
+           # PRECINCT=factor(PRECINCT),
+           LOCATION_DESC=factor(LOCATION_DESC),
+           JURISDICTION_CODE = fct_recode(factor(JURISDICTION_CODE),
+                                          "Patrol" = "0",
+                                          "Transit" = "1",
+                                          "Housing" = "2"),
+           PERP_AGE_GROUP=parse_factor(PERP_AGE_GROUP, age_levels),
+           VIC_AGE_GROUP=parse_factor(VIC_AGE_GROUP, age_levels)) %>% 
+    select(-c("Lon_Lat", "INCIDENT_KEY", "X_COORD_CD", "Y_COORD_CD", "Latitude", "Longitude", "PRECINCT"))
+```
+
+# Explore
+
+```{r explore, include=FALSE}
+# Explore the table interactively. Doesn't knit well.
+incidents
+```
+
+Rather than explore the data one *analysis* at a time, we will instead
+focus on one or more *columns* at a time and explore each in appropriate
+ways. However, an initial summary of the data is a useful starting
+point:
+
+```{r summarize}
+summary(incidents)
+```
+
+## Date of incident: `OCCUR_DATE`
+
+### Trends over Time: 2020 was BAD
+
+Consider annual incident totals, over time:
+
+```{r hist_DATE_year}
+yearly <- incidents %>% count(year=floor_date(OCCUR_DATE, "year"),
+                              year_num=year(floor_date(OCCUR_DATE, "year")))
+print(yearly)
+yearly_fit <- lm(formula = yearly$n ~ yearly$year)
+print(summary(yearly_fit))
+
+yearly %>%
+  ggplot(aes(year, n)) +
+    geom_line() +
+    geom_smooth(method="lm")
+```
+
+2020 was clearly a *wild* outlier. There was a strong linear trend from
+2006 through 2019, completely reversed in 2020. Without further
+investigation, we cannot fully assume the cause, but "in some way caused
+by the pandemic" seems like a reasonable starting point.
+
+Note that this is such an outlier that we cannot usefully detrend the
+data to remove the steady year-over-year drop, so instead we must simply
+remember that the overall volume of incidents roughly halved between
+2006 and 2019, then rebounded to 2006 levels in 2020. We can also
+consider proportional data normalized by each year's totals.
+
+Rather than consider all temporal trends at once, we will look at the
+trends within each category in turn.
+
+### Month of Year
+
+A different aspect of the date is any cycle within the year. We can plot
+which fraction of incidents occur in a given month (e.g. "February") and
+observe what appears to be a sinusoidal pattern.
+
+```{r by_month}
+monthly = incidents %>%
+  count(month=month(floor_date(OCCUR_DATE, "month"), label=TRUE),
+        month_num=month(floor_date(OCCUR_DATE, "month")),
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n/n.total)
+
+# The overall trend masks the seasonality in the raw plot:
+#monthly %>%
+#  ggplot(aes(month, n, color=year)) +
+#    geom_point()
+
+monthly %>%
+  ggplot(aes(month, fraction, color=year)) +
+    geom_point()
+```
+#### Trend over time
+
+The overlaid plot, above, shows an aggregate pattern but might hide an evolution over time.
+Plotting the fraction of annual crime in each month, longitudinally over years,
+would reveal this:
+
+```{r month_over_time}
+monthly %>%
+  ggplot(aes(x=year, y=fraction, color=year)) +
+    geom_line() +
+    facet_wrap(~month)
+
+```
+The only immediately visible trend is a shift in 2020 from January through April,
+toward June, July and August. This could be tentatively read as a covid-based
+signal partially overriding the established annual cycle.
+
+#### Sinusoidal Model
+
+Ignoring for the moment the pandemic shift, We can fit a scaled and offset sine
+wave to this data:
+
+```{r month_fit}
+sine_model <- nls(fraction ~ v_scale*sin(2*pi*month_num/12.0+phase)+offset, data=monthly, start=list(v_scale=1, phase=7*2*pi/12, offset=0.1))
+print(sine_model)
+
+monthly_with_sine_pred <- monthly %>%
+  mutate(predicted=predict(sine_model))
+
+sine_rmse = sqrt(mean((monthly_with_sine_pred$fraction - monthly_with_sine_pred$predicted)^2))
+print(c("RMSE of model: ", sine_rmse))
+
+```
+
+The root-mean-squared-error (RMSE) of \~0.014 can be interpreted in the
+units (fraction of the yearly incident volume), so this model predicts
+the actual monthly fraction of crime with an error of 1.4 percentage
+points, which is rather small compared to the magnitude of the values
+(largely between 5 and 10 percentage points); this is a strong result for
+such a simple model.
+
+Plotting the model we can confirm this fit visually. We also overlay
+a plot of the monthly average temperature in Central Park, per
+<https://www.weather.gov/media/okx/Climate/CentralPark/DailyAvgTNormals.pdf>,
+which, while not establishing a causal relationship, is certainly suggestive.
+
+```{r plot_monthly_sine_model}
+month_df = tibble(month_num=seq(1, 12))
+month_df$predicted=predict(sine_model, newdata=month_df)
+
+# Per https://www.weather.gov/media/okx/Climate/CentralPark/DailyAvgTNormals.pdf
+nyc_average_temps = c(33.6, 35.9, 43.0, 53.7, 63.2, 72.1, 77.6, 76.1, 69.3, 58, 48.1, 39.1)
+month_df$average_temp <- nyc_average_temps
+
+# Let the computer figure out the right scale and offset to align the temp
+# data with the sine model outputs.
+temp_model <- nls(predicted ~ temp_scale*average_temp+temp_offset,
+                  data=month_df,
+                  start=list(temp_scale=1, temp_offset=0))
+month_df$scaled_temp <- predict(temp_model)
+
+
+ggplot() +
+    geom_point(data=monthly_with_sine_pred, mapping=aes(x=month, y=fraction, color=year_num)) +
+    geom_line(data=month_df, mapping=aes(x=month_num, y=predicted, linetype="Sine Model")) +
+    geom_line(data=month_df, mapping=aes(x=month_num, y=scaled_temp, linetype="Avg Temperature"))
+
+```
+We can assert that there is a strong annual cycle that should be investigated,
+and a very interesting correlation with temperature, which suggests
+interpretations around how / where people spend their time in different seasons.
+
+Note that the 2020 outliers are clearly visible in this plot, lower after the
+pandemic response began in February, and higher in the summer.
+
+This concludes our look at the annual cycles in the data.
+
+### Day of month
+
+A similar analysis by day-of-month shows no noticeable pattern on first
+examination; there may be subtle structure here but it would not be the most
+promising topic to investigate first.
+
+```{r by_day_of_month}
+day_of_month = incidents %>%
+  count(day_of_month=mday(OCCUR_DATE),
+        month=floor_date(OCCUR_DATE, "month"),
+        month_num=month(floor_date(OCCUR_DATE, "month")),
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(monthly, by=c("month_num","year"), suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given month
+  mutate(fraction=n/n.total)
+
+day_of_month %>%
+  ggplot(aes(day_of_month, fraction, color=year, group=month)) +
+    geom_point()
+
+```
+
+### Day of Week
+
+We can plot what fraction of annual incidents occur on each day of the week,
+with one point per year, to look for overall trends:
+
+
+```{r by_day_of_week}
+day_of_week = incidents %>%
+  count(day_of_week=wday(OCCUR_DATE, label=TRUE),
+        day_num=wday(OCCUR_DATE),
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+  mutate(fraction=n/n.total)
+
+day_of_week %>%
+  ggplot(aes(day_of_week, fraction, color=year)) +
+    geom_point()
+
+```
+
+We can see that there is a strong weekly cycle to this data, again looking
+roughly sinusoidal.
+
+#### Trends over time
+
+Plotting the per-day trends over time:
+
+```{r day_trends}
+day_of_week %>%
+  ggplot(aes(x=year, y=fraction, color=year)) +
+    geom_line() +
+    facet_wrap(~day_of_week)
+```
+we can see that the pattern is relatively stable over time, unless one sees
+significance in the possible downward trend in Sunday shootings. (Unlike the
+monthly data, there is no major deviation from the pattern in 2020.)
+
+#### Sinusoidal model
+
+```{r day_fit}
+sine_day_model <- nls(fraction ~ v_scale*sin(2*pi*day_num/7.0+phase)+offset, data=day_of_week, start=list(v_scale=1, phase=0, offset=0.1))
+print(sine_day_model)
+
+day_of_week_with_sine_pred <- day_of_week %>%
+  mutate(predicted=predict(sine_day_model))
+
+sine_rmse = sqrt(mean((day_of_week_with_sine_pred$fraction - day_of_week_with_sine_pred$predicted)^2))
+print(c("RMSE of model: ", sine_rmse))
+
+```
+Much as with the monthly data, the fraction of annual incidents on a given day of the week
+are predicted quite well with this model, as seen by the RMSE of \~2 percentage points
+for data largely between 12 and 22 percentage points.
+
+### Joint Model
+
+Given the success of these two models in explaining a great deal of the
+variation at the weekly and monthly level,
+it seems reasonable to consider a joint model to predict daily totals based on
+two composed sine waves, one computed over day-of-week and one over month-of-year.
+
+```{r joint_model}
+# Generate 
+all_days <-
+  tibble(OCCUR_DATE=seq(from=min(incidents$OCCUR_DATE), to=max(incidents$OCCUR_DATE), by=1)) %>%
+  mutate(
+    day_num=wday(OCCUR_DATE),
+    month_num=month(floor_date(OCCUR_DATE, "month")),
+    year=floor_date(OCCUR_DATE, "year"))
+
+daily_counts <- incidents %>%
+  count(OCCUR_DATE=OCCUR_DATE) %>%
+  right_join(all_days, by="OCCUR_DATE") %>%
+  mutate(n=replace_na(n, 0)) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+  mutate(fraction=n/n.total)
+
+sine_joint_model <- nls(
+  fraction ~ week_scale*sin(2*pi*day_num/7.0+week_phase)+month_scale*sin(2*pi*month_num/12.0+month_phase)+offset,
+  data=daily_counts, start=list(week_scale=1, week_phase=0, month_scale=1, month_phase=0, offset=0.1))
+print(sine_joint_model)
+
+daily_counts_with_sine_pred <- daily_counts %>%
+  mutate(predicted=predict(sine_joint_model))
+
+sine_joint_rmse = sqrt(
+  mean(
+    (daily_counts_with_sine_pred$fraction - daily_counts_with_sine_pred$predicted)^2))
+print(c("RMSE of joint model: ", sine_joint_rmse))
+
+```
+
+```{r dump}
+#hist(daily_counts$fraction)
+daily_counts_with_sine_pred$resid = daily_counts_with_sine_pred$fraction - daily_counts_with_sine_pred$predicted
+daily_counts_with_sine_pred %>%
+  # Plot becomes unreadable with too many observations
+  filter(OCCUR_DATE < ymd("2006-07-01")) %>%
+  ggplot() +
+    geom_line(aes(x=OCCUR_DATE, y=predicted, color="predicted")) +
+    geom_line(aes(x=OCCUR_DATE, y=fraction, color="actual")) +
+    geom_line(aes(x=OCCUR_DATE, y=resid, color="residual"))
+```
+
+This model is rather underwhelming numerically - the RMSE is as of the same
+order as the signal - and visually there is no obvious explanation. The
+green (prediction) line is not unreasonable compared to the red actuals,
+but there is simply a great deal of day-to-day variation in the actuals
+which are not predicted by this model.
+
+This concludes our analysis of specifically temporal patterns, though we will
+consider the trend of each variable as we come to it.
+
+
+## Time of day: `OCCUR_TIME`
+
+We consider now the time of day when the incident is recorded.
+
+### Minute of hour
+
+It seems unlikely that shootings happen more often at the beginning of an hour
+than the end, say, but let us consider:
+
+```{r minute_of_hour}
+incidents %>%
+  count(minute=minute(OCCUR_TIME)) %>%
+  ggplot(aes(x=minute, y=n)) +
+    geom_point()
+
+#incidents %>%
+#  count(minute=minute(OCCUR_TIME))
+```
+The two highest peaks are at 0 and 30 minutes, with lower peaks at five minute
+intervals; counts are much lower between this values. This almost certainly
+demonstrates rounding in the data collection, *not* an actual semantic pattern
+to the time of incidents. Were it actually the case that "murders happen on 
+the half hour", we would expect to see high counts for 29 and 31 minutes as
+well, due to differing clocks and the difficulty of scheduling a shooting.
+In this data, however, the *lowest* points occur on each side of a spike,
+which strongly suggests that adjacent values are being rounded to the spike
+value.
+
+### Hour of day
+
+The simplest way to avoid being misled by these rounded values is to discard
+them. (Alternatively, we could bucket at 30 minute intervals, since that is
+roughly the granularity with which the data is **actually** collected.) We
+can then plot, for each year, the portion of incidents occuring in each hour
+of the day:
+
+```{r hour_of_day}
+hour_of_day = incidents %>%
+  count(hour_of_day=hour(OCCUR_TIME),
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+  mutate(fraction=n/n.total)
+
+hour_of_day %>%
+  ggplot(aes(hour_of_day, fraction, color=year)) +
+    geom_point()
+
+```
+
+This is not nicely sinusoidal like the weekly and monthly cycles, but there
+is a clear pattern here; incidents occur in the afternoon and especially
+overnight, but rarely in the dawn and waking hours.
+
+It is worth noting that bars in New York City close at 4am; this may help explain
+the timing of the downward discontinuity in the following hour.
+
+Considering the trends over time for each hour:
+
+```{r hour_trends}
+hour_of_day %>%
+  ggplot(aes(x=year, y=fraction, color=year)) +
+    geom_line() +
+    facet_wrap(~hour_of_day)
+```
+we see no glaring shifts occurring over time.
+
+## Borough
+
+We can plot borough population data, from
+<https://en.wikipedia.org/wiki/Boroughs_of_New_York_City>, against the fraction
+of incidents in each borough:
+
+
+```{r by_boro}
+# rounded to 0.1 million, from <https://en.wikipedia.org/wiki/Boroughs_of_New_York_City>
+boro_pops = tibble(BORO=levels(incidents$BORO),
+                   pop=c(1.4,2.7,1.7,2.4,0.5)) %>%
+  mutate(pop_frac=pop/sum(pop))
+
+by_boro = incidents %>%
+  count(BORO=BORO,
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+  mutate(fraction=n/n.total)
+
+ggplot() +
+  geom_point(data=by_boro, aes(x=BORO, y=fraction, color=year, shape="Incident fraction")) +
+  geom_point(data=boro_pops, aes(x=BORO, y=pop_frac, shape="Population fraction"))
+
+```
+
+We see that the Bronx and Brooklyn have a greater proportional share of
+incidents than of population, while Manhattan and Queens have a smaller
+share of incidents than residents, and Staten Island has roughly "its fair share".
+
+Understanding the causes of these differences is beyond this paper, but
+some possible factors include:
+
+* Residential population is not instantaneous population; incidents do not
+  necessarily happen in people's homes.
+* Further, the strong time-of-day cycle in incidents may factor in; most incidents
+  happen in the evening hours, so if people are more likely to visit a particular
+  borough at night, it might have a sharply higher population *during those hours*.
+* There are many differences between boroughs beyond simple population; many
+  socioeconomic, demographic, and other factors might influence the rate of
+  incidents.
+
+Plotting the per-borough split over time, the pattern has been quite stable:
+
+```{r boro_trends}
+by_boro %>%
+  ggplot(aes(year, fraction, color=year)) +
+    geom_line() +
+    facet_wrap(~BORO)
+```
+
+## Jurisdiction
+
+Several police jurisdictions are represented in the dataset. These represent
+first: differing *institutions*, possibly reporting or acting in different ways,
+and secondly: different *locations* where incidents occur, whether in public
+housing, mass transit, or elsewhere.
+
+The proportion of incidents in the different juridictions has been stable
+over time:
+
+
+```{r by_jurisdiction}
+by_juris = incidents %>%
+  count(JURISDICTION_CODE=JURISDICTION_CODE,
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+  mutate(fraction=n/n.total)
+
+by_juris %>%
+ggplot() +
+  geom_line(aes(x=year, y=fraction, color=year)) +
+  facet_wrap(~JURISDICTION_CODE)
+```
+We can demonstrate at a coarse level how Jurisdiction is confounded with location
+by considering the fraction of annual per-borough incidents which fall into each jurisdiction:
+
+```{r juris_by_boro}
+# This version scaled by the total annual incidents, which meant that
+# boroughs with more total incidents appeared to have different
+# transit / housing / patrol ratios.
+#
+#by_juris_boro = incidents %>%
+#  count(JURISDICTION_CODE=JURISDICTION_CODE,
+#        BORO=BORO,
+#        year=floor_date(OCCUR_DATE, "year")) %>%
+#  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+#  mutate(fraction=n/n.total)
+
+
+
+by_juris_boro = incidents %>%
+  count(JURISDICTION_CODE=JURISDICTION_CODE,
+        BORO=BORO,
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(incidents %>%
+              count(year=floor_date(OCCUR_DATE, "year"),
+                    BORO=BORO),
+            by=c("year", "BORO"), suffix=c("", ".total")) %>%
+  # n.total is the total incidents in that borough in the given year
+  mutate(fraction=n/n.total)
+
+
+by_juris_boro %>%
+ggplot() +
+  geom_point(aes(x=JURISDICTION_CODE, y=fraction, color=year)) +
+  facet_wrap(~BORO)
+```
+Note that in the original version of this chart, the per-borough, per-jurisdiction
+count was scaled as a fraction of the *total* annual incidents, not the
+*per borough* annual incidents. The result was that boroughs with higher overall
+incident counts appeared to have different jurisdictional splits. However
+this effect disappears when properly normalized as seen here.
+
+## Location Desc
+
+There are many location categories, but the most common 6 cover 95% of the
+total incidents:
+
+```{r by_location}
+by_location <- incidents %>%
+  count(LOCATION_DESC=LOCATION_DESC) %>%
+  arrange(desc(n)) %>%
+  mutate(fraction=n/sum(n)) %>%
+  mutate(LOCATION_DESC=fct_reorder(LOCATION_DESC, desc(fraction))) %>%
+  mutate(cumulative=cumsum(fraction))
+
+by_location %>%
+#  filter(fraction > 0.0001)
+  ggplot(aes(x=LOCATION_DESC, y=cumulative)) +
+    geom_point()
+
+```
+
+```{r by_location_sub}
+top_locs <- head(by_location$LOCATION_DESC, 6)
+
+by_location %>%
+  filter(LOCATION_DESC %in% top_locs)
+#%>%
+#  ggplot() +
+#    geom_point(aes(x=LOCATION_DESC, y=fraction))
+
+```
+
+An important thing to note is that a full 58% of
+the incidents have location "NONE". It is unclear (and likely varies between
+reporters) whether this means "unknown" or "outside" or "none of the listed
+options". In the extreme, if these NONEs were all misclassified from a single
+location, then that location would immediately be the most common, regardless
+the other counts. Therefore this entire section of analysis must be considered
+very cautiously.
+
+There is some defense for considering the most frequent values; these locations
+apparently are clear enough that reporters use them, and they occur often
+enough that it is unlikely they are all reporting errors. On that tenuous basis
+we will look at trends over time among these six:
+
+```{r loc_over_time}
+incidents %>%
+  count(LOCATION_DESC=LOCATION_DESC,
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+  mutate(fraction=n/n.total) %>%
+  # Drop NONE off the beginning, we don't know what it means and it
+  # crushes the vertical scale.
+  filter(LOCATION_DESC %in% tail(top_locs, 5)) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~LOCATION_DESC)
+```
+As with some other columns, graphs of the raw totals would suggest a shift toward
+public housing and apartment buildings in 2020, but they are in fact largely unchanged in
+fraction of annual incidents, as seen here.
+
+## Victim Demographics
+
+### VIC_RACE
+
+We can use census demographic data from
+<https://www.census.gov/quickfacts/newyorkcitynewyork> to consider victim
+race in light of population demographics. One immediate concern is that the
+census ACS categories are different than the reporting categories in this
+incident data; in particular, the ACS does not split into BLACK HISPANIC
+and WHITE_HISPANIC, and does encode "Two or more Races".
+
+The plot below presents population markers only for the aligned categories.
+However we should note that the difference in categories is itself a direct
+source of bias: if we cannot easily measure and compare these measures
+across different datasets, that serves to obscure the true differential
+impact of shooting incidents.
+
+```{r vic_race}
+nyc_demo = tibble(
+  VIC_RACE=levels(incidents$VIC_RACE),
+  # Per <https://www.census.gov/quickfacts/newyorkcitynewyork>. This source
+  # does not split out values for BLACK HISPANIC vs WHITE HISPANIC, nor
+  # UNKNOWN
+  fraction=c(0.4, 14.3+0.1, 23.8, NA, NA, 41.3, NA)/100.0
+)
+
+by_vic_race = incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        VIC_RACE=VIC_RACE) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total)
+ggplot() +
+  geom_point(data=by_vic_race, aes(VIC_RACE, fraction, shape="incident fraction", color=year)) +
+  geom_point(data=nyc_demo, aes(VIC_RACE, fraction, shape="population fraction")) +
+  coord_flip()
+
+```
+
+From the limited data available, the primary conclusion is that people coded
+as BLACK are the victims in incidents far more often than their portion of
+the population as a whole, and those coded as WHITE, far less often;
+ASIAN/PACIFIC ISLANDER is also a lower proportion though less extremely than
+WHITE.
+
+The incident-fraction values are clearly quite divergent from the
+population-fraction values. This reveals a true disparate
+impact of incidents across the races; however there are several issues
+to confirm, to understand the context and potential for over- or under-stating
+these figures:
+
+* Who determines the race recorded for a victim? Is it the victim themselves?
+  (Unlikely in the event of a "successful" shooting.) Is it a
+  police officer, or someone else, or does it vary?
+* What are the guidelines for characterizing races? Are there incentives on the
+  person recording, or their organization, to prefer to record in one way or
+  another?
+* How does this compare to the way race is recorded in the American Community
+  Survey, which provides the population figures? Are there incentive structures
+  there to skew the data one way or another?
+* In particular, how do the "Two or more Races" and "Hispanic or Latino" census
+  categories relate to the BLACK HISPANIC and WHITE HISPANIC incident categories?
+
+Plotting the race of victims over time, the proportions are relatively stable:
+
+```{r yearly_vic_race}
+incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        VIC_RACE=VIC_RACE) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~VIC_RACE)
+
+```
+
+### VIC_AGE
+
+We can examine the portion of annual incidents in each victim age group, over the
+years:
+
+```{r yearly_vic_age}
+incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        VIC_AGE_GROUP=VIC_AGE_GROUP) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~VIC_AGE_GROUP)
+
+```
+This reflects a modest shift over the past 5 years from 18-24 year old victims toward
+25-44 year old victims. One angle for investigation would be to compare this
+shift to any overall shift in the age distribution of New Yorkers during this
+time window.
+
+### VIC_SEX
+
+The dataset presents a very "traditionalist" view of gender (which is likely
+what is intended), including referring to it as "sex" and structuring it as a
+strict dichotomy. This very encoding limits some kinds of analyses: for example
+it is impossible to assess the impact of shooting incidents on non-binary
+individuals when they are simply invisible in the data.
+
+
+```{r yearly_vic_sex}
+incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        VIC_SEX=VIC_SEX) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~VIC_SEX)
+
+```
+Victims are male far more often than female or unknown gender, consistently over
+time. This is subject to the same coding and reporting questions as VIC_RACE, but
+it seems equally certain that there is a real disparity here, though the
+exact magnitude would need to be carefully examined.
+
+### Jointly: Age, Gender and Race
+
+There are a combinatorial number of age, race and gender graphs we could examine,
+but the key story is told by just two, if we filter to the intersectional
+categories which suffer more than 10% of the city's incidents each year:
+
+```{r yearly_vic_demo}
+vic_demo = incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        VIC_RACE=VIC_RACE,
+        VIC_AGE_GROUP=VIC_AGE_GROUP,
+        VIC_SEX=VIC_SEX) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total)
+
+#vic_demo %>%
+#  filter(VIC_SEX=="M") %>%
+#  ggplot(aes(year, fraction)) +
+#    geom_line() +
+#    facet_grid(rows=vars(VIC_RACE), cols=vars(VIC_AGE_GROUP))
+
+vic_demo %>%
+  filter(fraction > 0.1) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~VIC_AGE_GROUP + VIC_RACE + VIC_SEX)
+
+```
+Shooting victimhood is distributed between these two groups, along an arbitrary
+boundary at age 25. If we sum them together:
+
+```{r yearly_vic_sum}
+vic_demo %>%
+  filter(fraction > 0.1) %>%
+  group_by(year) %>%
+  summarize(fraction=sum(fraction)) %>%
+  ggplot(aes(year, fraction)) +
+    ggtitle("Shooting Victims: Black, Male, age 18-44") +
+    ylab("fraction of annual total") +
+    geom_line()
+```
+
+Black men between the ages of 18 and 44 suffer slightly more than half of all shooting
+incidents in the city. Further research could establish a true population
+proportion for this group; if we assume (incorrectly) that age, gender and
+race are independently distributed, we can use figures from
+<https://www.census.gov/quickfacts/fact/table/newyorkcitynewyork>
+to estimate this group as around 7% of the total population:
+
+
+```{r intersection_approx}
+frac_female=0.523
+frac_lt_18=0.207
+frac_gt_65=0.149
+frac_black=0.238
+
+print(c("Approx fraction 18-65 black males: ", (1-frac_female) * (1-(frac_lt_18+frac_gt_65)) * frac_black))
+```
+## Perpetrator Demographics
+
+We can repeat a similar analysis for the perpetrator, though in many more cases
+this information is unknown. Note that all of the data provenance and
+recording / encoding questions from victim demographics apply here as well,
+though crucially the reporters' incentives may differ when recording
+the attributes of the perpetrator compared to those of the victim (so the
+questions are similar but the answers may differ).
+
+### PERP_RACE
+
+```{r perp_race}
+by_perp_race = incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        PERP_RACE=PERP_RACE) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total)
+ggplot() +
+  geom_point(data=by_perp_race, aes(PERP_RACE, fraction, shape="incident fraction", color=year)) +
+  geom_point(data=nyc_demo, aes(VIC_RACE, fraction, shape="population fraction")) +
+  coord_flip()
+
+```
+The perpetrator race data is similar to the victim race, in terms of
+over-representation for black-coded individuals and under-representation for
+white-coded and asian/pacific-islander-coded individuals. The major different
+dynamic is the large block of UNKNOWN values, as well as a wider spread in
+the annual values for the different classifications. Examining the trends
+over time:
+
+
+```{r yearly_perp_race}
+incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        PERP_RACE=PERP_RACE) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~PERP_RACE)
+
+```
+we see that BLACK and UNKNOWN reports have traded positions over the dataset,
+with the UNKNOWN portion rising as the BLACK portion drops; other categories
+appear to remain roughly constant. This pattern could represent many different things:
+
+* Maybe fewer BLACK-coded individuals are perpetrating
+  incidents, and this data reflects that; the UNKNOWNs might in fact all be
+  recorded as another category if they could be identified.
+* As the plurality of perpetrators have historically been recorded as black,
+  this could signify that fewer perpetrators are being caught overall, and
+  the trend is simply more visible for the BLACK category.
+* Subtly differently, if the data is updated when a perpatrator is identified,
+  it is possible that the rise in UNKNOWN signifies shootings that are not yet
+  solved, and in the future those incidents may be reassigned once a perpatrator
+  is identified.
+* Reporting and recording standards may have changed over time,
+  and an identification of a black perpetrator may be less of an immediate default
+  than it once was.
+* The source of this data may be less objective than it presents. For example,
+  if the `PERP_*` fields are based on a victim's or witness's description, rather
+  than an independently identified individual, it is possible that fewer descriptions
+  are confident about the race of the perpetrator than previously.
+
+Separately from this shift over time, we should also exercise caution about
+interpreting the high BLACK proportion, as this may be based on individuals who
+are caught by police and charged with a crime, which may in turn reflect many
+layers of bias and inequity in the police, prosecutor's office, and other
+institutions.
+
+We can also filter out UNKNOWN entries and plot the breakdown of the
+remaining annual incidents:
+
+```{r yearly_perp_race_known_only}
+known_annual <- incidents %>%
+  filter(PERP_RACE != "UNKNOWN") %>%
+  count(year=floor_date(OCCUR_DATE, "year"),
+        PERP_RACE=PERP_RACE)
+
+known_annual %>%
+  left_join(
+    known_annual %>%
+      group_by(year) %>%
+      summarize(annual_total=sum(n)),
+    by=c('year')
+  ) %>%
+  mutate(fraction=n / annual_total) %>%
+  ggplot(aes(year, fraction)) +
+    ylab("Fraction of incidents with known perpetrator race") +
+    geom_line() +
+    facet_wrap(~PERP_RACE)
+  
+```
+The stability seen in these proportions suggests that the increasing fraction
+of UNKNOWN perpetrators drives all the changes seen in the previous set of
+graphs, and in fact the breakdown has been steady over time.
+
+
+### PERP_AGE
+
+We can examine the portion of annual incidents in each victim age group, over the
+years:
+
+```{r yearly_perp_age}
+incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        PERP_AGE_GROUP=PERP_AGE_GROUP) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~PERP_AGE_GROUP)
+```
+Similar to race, the same patterns emerge from PERP and from VIC age data;
+most perpetrators are 18-44, though the magnitude of those lines is lower
+due to the high fraction of UNKNOWN ages.
+
+### PERP_SEX
+
+```{r yearly_perp_sex}
+incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        PERP_SEX=PERP_SEX) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~PERP_SEX)
+
+```
+As with victims, most perpetrators are male, with an increasing fraction of
+UNKNOWN as the dates approach the present day.
+
+### Jointly: Perpetrators
+
+Again let us consider the higher-prevalence Age/Gender/Race groups:
+
+```{r yearly_perp_demo}
+perp_demo = incidents %>% 
+  count(year=floor_date(OCCUR_DATE, "year"),
+        PERP_RACE=PERP_RACE,
+        PERP_AGE_GROUP=PERP_AGE_GROUP,
+        PERP_SEX=PERP_SEX) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total)
+
+#vic_demo %>%
+#  filter(VIC_SEX=="M") %>%
+#  ggplot(aes(year, fraction)) +
+#    geom_line() +
+#    facet_grid(rows=vars(VIC_RACE), cols=vars(VIC_AGE_GROUP))
+
+perp_demo %>%
+  filter(fraction > 0.1) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    facet_wrap(~PERP_AGE_GROUP + PERP_RACE + PERP_SEX)
+
+```
+Where not unknown, this is the same group as the victims: male, black, aged 18-44.
+The same demographic group is both the most common perpetrator and victim
+in these incidents, as encoded within this dataset.
+
+We can again consider only those incidents with a known perpetrator:
+
+```{r yearly_perp_demo_known}
+known_perp_demo = incidents %>%
+  filter((PERP_RACE != "UNKNOWN") & (PERP_AGE_GROUP != "UNKNOWN")) %>%
+  mutate(year=floor_date(OCCUR_DATE, "year"))
+yearly_perp_known_demo <- known_perp_demo %>% 
+  count(year=year,
+        PERP_RACE=PERP_RACE,
+        PERP_AGE_GROUP=PERP_AGE_GROUP,
+        PERP_SEX=PERP_SEX) %>%
+  left_join(known_perp_demo %>% count(year=year),
+            by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n / n.total)
+
+yearly_perp_known_demo %>%
+  filter(fraction > 0.1) %>%
+  ggplot(aes(year, fraction)) +
+    geom_line() +
+    geom_point() +
+    facet_wrap(~PERP_AGE_GROUP + PERP_RACE + PERP_SEX)
+```
+We see a very similar pattern to victim demographics. Paralleling our analysis
+from there, we can combine the slices:
+
+```{r summed_yearly_perp_demo}
+yearly_perp_known_demo %>%
+  # Bump filter slightly higher to drop a single year of Black Male <18
+  # which is valid but makes the age group more diffuse.
+  filter(fraction > 0.15) %>%
+  group_by(year) %>%
+  summarize(fraction=sum(fraction))  %>%
+  ggplot(aes(year, fraction)) +
+    ggtitle("Shooting Perpetrator: Black, Male, age 18-44") +
+    ylab("fraction of known-perpetrator annual total") +
+    geom_line()
+```
+Despite some mild ups and downs (note the narrow vertical scale on this chart),
+the overall proportion has been stable and high. As seen in the victim demographic
+analysis, this is vastly out of proportion to the population fraction of this
+demographic group.
+
+
+# Bias Considerations
+
+There are numerous sources of possible bias in this analysis, both within the
+original data and in the analysis processes adopted in this paper.
+
+## Within the Data Source
+
+On a column-by-column basis, many fields encode possible biases on the parts of
+the process and the individuals generating and encoding the data. As noted
+above, demographic fields like race and gender cannot be measured objectively,
+and this leads to many opportunities for the as-reported data to reflect the
+preconceptions of those generating it, or to align with the reporting trends
+which would most benefit them.
+
+The perpetrator's demographic columns are even more fertile ground for possible
+bias and preconception to emerge and be encoded into the data; the lack of
+transparency about the meaning and source of these fields in the "footnotes" PDF 
+is itself a warning sign that this data may be intentionally opaque or allowing
+itself to be misinterpreted.
+
+Both the "sex" and "race" fields demonstrate a structural type of bias,
+inherent in the dataset schema and largely independent of the biases of the
+individual reporters. By specifying only "M", "F", "U" fields for sex, people
+of other genders are invisible in the dataset, and their impact or victimhood
+cannot be assessed. Similarly, the "race" levels are quite arbitrary, and
+because they do not align with the levels in Census data, it makes it impossible
+to do some kinds of baselining or normalization.
+
+One very important bias in the data is invisible: those incidents which are not
+recorded. Are there types of shooting incident, or possible shooting incidents,
+that are not present in the dataset? Is there any judgement call in what gets
+recorded as a shooting incident, and is there any influence on that judgement
+to record those incidents which fit some set of expected parameters or
+narratives?
+
+## Within the Analysis
+
+The author has a strong prior expectation that gun violence and hence shooting
+incidents will be concentrated, in both victim and perpetrator, among the
+poorest and most disadvantaged populations. He also notes that many types of
+law enforcement misconduct or bias have historically impacted the same populations;
+as this dataset is apparently gathered by the NYPD, both of those factors may
+influence both who is involved in shooting incidents, and how those incidents
+are recorded. In an attempt to mitigate the impact of authorial bias,
+caution has been taken to lead with the data in all cases, for example sorting
+by category prevalence rather than selecting data for specific racial categories.
+
+In a more procedural area, the author assumes that analyzing the *proportion of annual incidents* is a
+meaningful way to correct for annual fluctuations in the level of incidents.
+This assumption is broadly validated by several columns which appear to have
+meaningful changes when considered in absolute counts, but those flatten to
+a stable proportion when considered as a proportion of annual incidents. However,
+this proportional analysis serves to hide the actual scale of counts in each
+category or level. If there are psychologically or otherwise meaningful thresholds
+in absolute counts -- for example a hypothetical regulation might trigger an outreach
+program for demographic groups suffering more than 1,000 annual shooting incidents --
+those would be invisible in the analysis presented here.
+
+# Conclusion
+
+This is a complex and highly structured dataset. There is clear periodic
+structure, at multiple scales (time of day versus time of year, for example) in
+the times when incidents occur. There is substantial skew in the demographic
+breakdown of both victims and perpetrators, compared to the overall population
+of the city. We must use caution in drawing conclusions here, especially without
+more information about the source and meaning of these fields. However, it
+appears that individuals involved in shootings, whether as victims or perpetrators,
+are vastly more likely to be recorded as BLACK, MALE, and in the 18-24 or 25-44
+age groups.
+
+
+# Appendix
+
+## Session Info
+
+```{r sessionInfo}
+sessionInfo()
+```
