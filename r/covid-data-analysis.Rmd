@@ -1,8 +1,11 @@
 ---
 title: "Covid-19 Dataset Analysis"
 author: "Seth Porter"
-date: '2022-04-16'
-output: pdf_document
+date: "2022-04-16"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
 ---
 
 ```{r setup, include=FALSE}
@@ -19,7 +22,7 @@ between COVID-19 impact and socio-economic metrics.
 The primary data source for this analysis is from the
 COVID-19 Data Repository by the Center for Systems Science and Engineering
 (CSSE) at Johns Hopkins University, as published on Github:
-<https://github.com/CSSEGISandData/COVID-19>. The original dataset was described
+(<https://github.com/CSSEGISandData/COVID-19>). The original dataset was described
 in 
 Dong, Du, and Gardner, "An interactive web-based dashboard to track COVID-19 in real time", 
 The Lancet 20.5 (2020) P533-534.
@@ -27,9 +30,9 @@ The Lancet 20.5 (2020) P533-534.
 We enrich this data with income, poverty and population data from secondary
 datasets:
 
-* Small Area Income and Poverty Estimates (SAIPE) Program from the US Census <https://www.census.gov/programs-surveys/saipe.html>
+* Small Area Income and Poverty Estimates (SAIPE) Program from the US Census (<https://www.census.gov/programs-surveys/saipe.html>)
 * County population estimates from the US Census' 
-  Population Estimates Program (PEP) <https://www.census.gov/programs-surveys/popest.html> 
+  Population Estimates Program (PEP) (<https://www.census.gov/programs-surveys/popest.html>)
 
 Specific data products are referenced in the Data Import and Tidying section,
 following.
@@ -46,8 +49,17 @@ may skip to the Analysis heading.
 First, we import a number of libraries we will need.
 
 ```{r dependencies}
+library(conflicted)
+
 # Tidyverse and sub-projects
 library(tidyverse)
+# if this fails, please install with `install.packages("tidyverse")` in the console
+
+# The new fancy error messages breaks LaTeX rendering at least on
+# my machine, so avoid it.
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+
 library(lubridate)
 library(readxl)
 library(stringr)
@@ -59,10 +71,10 @@ library(ggcorrplot)
 
 ## Daily Covid Reports: Import and Tidying
 
-For a current snapshot, we use the `csse_covid_19_daily_reports` described
-in <https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data#daily-reports-csse_covid_19_daily_reports>;
+For a snapshot, we use the `csse_covid_19_daily_reports` described
+in (<https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data#daily-reports-csse_covid_19_daily_reports>);
 specifically the report from April 1, 2022 downloaded from
-<https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/04-01-2022.csv>.
+(<https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/04-01-2022.csv>).
 
 ```{r import_april_data}
 snapshot_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_daily_reports/04-01-2022.csv"
@@ -92,10 +104,10 @@ We use a US Census data product to provide median income and poverty-level
 estimates on a county level. This is a modeled dataset based on several
 indicators to provide a consistent product across the country.
 
-* Overall docs <https://www.census.gov/programs-surveys/saipe.html>
-* Specific product: "SAIPE State and County Estimates for 2020" <https://www.census.gov/data/datasets/2020/demo/saipe/2020-state-and-county.html>
-* Field-level documentation <https://www2.census.gov/programs-surveys/saipe/technical-documentation/file-layouts/state-county/2020-estimate-layout.txt>
-* Dataset URL <https://www2.census.gov/programs-surveys/saipe/datasets/2020/2020-state-and-county/est20all.xls>
+* Overall docs (<https://www.census.gov/programs-surveys/saipe.html>)
+* Specific product: "SAIPE State and County Estimates for 2020" (<https://www.census.gov/data/datasets/2020/demo/saipe/2020-state-and-county.html>)
+* Field-level documentation (<https://www2.census.gov/programs-surveys/saipe/technical-documentation/file-layouts/state-county/2020-estimate-layout.txt>)
+* Dataset URL (<https://www2.census.gov/programs-surveys/saipe/datasets/2020/2020-state-and-county/est20all.xls>)
 
 Unlike the Covid data, separate FIPS fields are present for state and county,
 so must be combined into a single field before the datasets can be joined.
@@ -113,8 +125,9 @@ poverty <- read_excel(poverty_file, range="A4:Y3199", .name_repair = "universal"
            )) %>%
   mutate(Postal.Code=factor(Postal.Code),
          FIPS=paste0(State.FIPS.Code, County.FIPS.Code),
-         Poverty.Estimate..All.Ages=as.numeric(Poverty.Estimate..All.Ages),
-         Median.Household.Income=as.numeric(Median.Household.Income)) %>%
+         # Kalawao County has "." for two fields, just allow them to coerce to NA.
+         Poverty.Estimate..All.Ages=suppressWarnings(as.numeric(Poverty.Estimate..All.Ages)),
+         Median.Household.Income=suppressWarnings(as.numeric(Median.Household.Income))) %>%
   rename(
     PovertyCount=Poverty.Estimate..All.Ages) %>%
   # Prune state-level aggregates
@@ -224,9 +237,9 @@ us_daily_poverty <- us_daily %>%
 The Johns Hopkins dataset only reports deaths as total counts, not scaled by
 population. To compare death rates across the country, we must join against
 a population data source. In this analysis we use the US Census Population
-and Housing Unit Estimates <https://www.census.gov/programs-surveys/popest.html>,
-in particular the 2021 vintage population estimates: <https://www2.census.gov/programs-surveys/popest/datasets/2020-2021/counties/totals/co-est2021-alldata.csv>
-which has fields described at <https://www2.census.gov/programs-surveys/popest/technical-documentation/file-layouts/2020-2021/CO-EST2021-ALLDATA.pdf>
+and Housing Unit Estimates (<https://www.census.gov/programs-surveys/popest.html>),
+in particular the 2021 vintage population estimates: (<https://www2.census.gov/programs-surveys/popest/datasets/2020-2021/counties/totals/co-est2021-alldata.csv>)
+which has fields described at (<https://www2.census.gov/programs-surveys/popest/technical-documentation/file-layouts/2020-2021/CO-EST2021-ALLDATA.pdf>)
 
 ```{r population_import}
 pop_url <- "https://www2.census.gov/programs-surveys/popest/datasets/2020-2021/counties/totals/co-est2021-alldata.csv"
