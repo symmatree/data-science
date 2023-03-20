@@ -1,0 +1,493 @@
+---
+title: "New York City Shooting Incidents"
+author: "Seth Porter"
+date: "2023-03-20"
+output:
+  powerpoint_presentation:
+    reference_doc: custom-reference.pptx
+  beamer_presentation:
+    theme: "Pittsburgh"
+    colortheme: "dolphin"
+    fonttheme: "structurebold"
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r setup_data, echo=FALSE, include=FALSE}
+library(conflicted)
+
+# Tidyverse and sub-projects
+library(tidyverse)
+# if this fails, please install with `install.packages("tidyverse")` in the console
+library(lubridate)
+
+# The new fancy error messages breaks LaTeX rendering at least on
+# my machine, so avoid it.
+conflict_prefer("filter", "dplyr")
+conflict_prefer("lag", "dplyr")
+
+url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+raw_incidents <- read_csv(url)
+gender_levels <- c("M", "F", "U")
+# Use the data to generate these lists, the values are long and messy
+race_levels <- levels(factor(raw_incidents$VIC_RACE))
+# PERP_AGE_GROUP has some values that VIC_AGE_GROUP doesn't, but they're bad.
+age_levels = levels(factor(raw_incidents$VIC_AGE_GROUP))
+boro_levels <- c( "BRONX", "BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND")
+# use parse_factor to warn if we get unexpected values
+incidents <- raw_incidents %>%
+    filter(!is.na(JURISDICTION_CODE)) %>%
+    mutate(OCCUR_DATE=mdy(OCCUR_DATE),
+           LOCATION_DESC=replace_na(LOCATION_DESC, "NONE"),
+           PERP_RACE=replace_na(PERP_RACE, "UNKNOWN"),
+           PERP_AGE_GROUP=replace_na(PERP_AGE_GROUP, "UNKNOWN"),
+           PERP_SEX=replace_na(PERP_SEX, "U")) %>%
+    mutate(PERP_AGE_GROUP=recode(PERP_AGE_GROUP,
+           "1020"= "UNKNOWN",
+           "224" = "UNKNOWN",
+           "940" = "UNKNOWN")) %>%
+    mutate(PERP_SEX=parse_factor(PERP_SEX, levels=gender_levels),
+           VIC_SEX=parse_factor(VIC_SEX, levels=gender_levels),
+           PERP_RACE=parse_factor(PERP_RACE, levels=race_levels),
+           VIC_RACE=parse_factor(VIC_RACE, levels=race_levels),
+           BORO=parse_factor(BORO, levels=boro_levels),
+           # PRECINCT=factor(PRECINCT),
+           LOCATION_DESC=factor(LOCATION_DESC),
+           JURISDICTION_CODE = fct_recode(factor(JURISDICTION_CODE),
+                                          "Patrol" = "0",
+                                          "Transit" = "1",
+                                          "Housing" = "2"),
+           PERP_AGE_GROUP=parse_factor(PERP_AGE_GROUP, age_levels),
+           VIC_AGE_GROUP=parse_factor(VIC_AGE_GROUP, age_levels)) %>%
+    mutate(year=floor_date(OCCUR_DATE, "year")) %>%
+    select(-c("Lon_Lat", "INCIDENT_KEY", "X_COORD_CD", "Y_COORD_CD", "Latitude", "Longitude", "PRECINCT"))
+```
+
+# What are we looking at, and why should I care?
+
+We will examine "shooting incident" data from the New York City Police Department.
+
+Shooting incidents are extreme events which can end or radically change the
+lives of both the victim and the shooter in a single action.
+
+Understanding their patterns is crucial to policy and intervention decisions
+from law enforcement, other city agencies, and non-governmental actors.
+
+# Where is the data from?
+
+* Dataset sourced from <https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic>, 
+  described in Footnotes (<https://bit.ly/3KSLRjA>)
+* "List of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year."
+* "Only valid shooting incidents resulting in an injured victim are included in this
+release."
+
+# Secondary data sources
+
+In addition to the primary data, some secondary sources are used to
+contextualize or suggest possible causal variables:
+
+* Temperature data from <https://www.weather.gov/media/okx/Climate/CentralPark/DailyAvgTNormals.pdf>
+* Population data from <https://www.census.gov/quickfacts/newyorkcitynewyork>
+
+# Preliminary Cautions
+
+Be cautious; this data is from a law enforcement agency reporting on its own
+jurisdiction, and may have obvious
+as well as unexpected biases or gaps in the collection and reporting process.
+
+# Self Links
+
+Github repo: <https://github.com/symmatree/data-science/tree/main/r>
+
+* These slides: Source (<https://github.com/symmatree/data-science/raw/main/r/NYPDShootingDataSlides.Rmd>) /
+  [pdf](https://github.com/symmatree/data-science/raw/main/r/NYPDShootingDataSlides.pdf) /
+  [pptx](https://github.com/symmatree/data-science/raw/main/r/NYPDShootingDataSlides.pptx)
+* The full analysis document has more discussion of data tidying and methods:
+  <https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.Rmd> (source) /
+  [pdf](https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.pdf)
+
+# Two Major Approaches
+
+We will consider
+
+* patterns-over-time and seasonality
+* demographics of victims and perpetrators
+
+in hopes of understanding the patterns and impacts of these incidents.
+
+# Data Analysis - Temporal trends
+
+Our first layer of analysis will focus on **when** shootings occur, considering
+both the overall trend and various scales of periodic behavior.
+
+# Long-term trends
+
+::: columns
+
+:::: column
+
+Reported shooting incidents dropped steadily, then
+rose sharply in 2020 (presumably pandemic-related, though possibly
+a reporting change).
+
+This is such a sharp reversal that it dominates other trends.
+
+The rest of this analysis will normalize by annual incident count to 
+reveal patterns masked by this macro-trend.
+
+::::
+
+:::: column
+
+```{r hist_DATE_year, echo=FALSE, dpi=300}
+yearly <- incidents %>% count(
+  year=floor_date(OCCUR_DATE, "year"),
+  year_num=year(floor_date(OCCUR_DATE, "year")))
+yearly_fit <- lm(yearly$n ~ yearly$year)
+
+yearly_with_pred <- yearly %>%
+  mutate(predicted=predict(yearly_fit))
+
+yearly_with_pred %>%
+  ggplot(aes(x=year)) +
+    ggtitle("Shooting Incidents over time") +
+    theme(legend.position="bottom") +
+    ggplot2::guides(colour=ggplot2::guide_legend(title="")) +
+    ylab("Number of incidents") +
+    geom_point(aes(y=n, color="actual")) +
+    geom_line(aes(y=n, color="actual")) +
+    geom_line(aes(y=predicted, color="predicted"))
+```
+::::
+
+:::
+
+# Seasonality: Month of year
+
+::: columns
+
+:::: column
+
+A shifted and vertically-scaled sine wave fits the monthly data quite nicely.
+
+Average NYC temperatures correlate strongly with both this model and the
+observed incident counts.
+
+This suggests (though does not prove!) that temperature-driven behavior patterns
+are a major driver of the overall level of shootings.
+
+::::
+
+:::: column
+
+```{r plot_monthly_sine_model, dpi=300}
+monthly = incidents %>%
+  count(month=month(floor_date(OCCUR_DATE, "month"), label=TRUE),
+        month_num=month(floor_date(OCCUR_DATE, "month")),
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n/n.total)
+
+sine_model <- nls(fraction ~ v_scale*sin(2*pi*month_num/12.0+phase)+offset, data=monthly, start=list(v_scale=1, phase=7*2*pi/12, offset=0.1))
+
+month_df = tibble(month_num=seq(1, 12))
+month_df$predicted=predict(sine_model, newdata=month_df)
+
+# Per https://www.weather.gov/media/okx/Climate/CentralPark/DailyAvgTNormals.pdf
+nyc_average_temps = c(33.6, 35.9, 43.0, 53.7, 63.2, 72.1, 77.6, 76.1, 69.3, 58, 48.1, 39.1)
+month_df$average_temp <- nyc_average_temps
+
+# Let the computer figure out the right scale and offset to align the temp
+# data with the sine model outputs.
+temp_model <- nls(predicted ~ temp_scale*average_temp+temp_offset,
+                  data=month_df,
+                  start=list(temp_scale=1, temp_offset=0))
+month_df$scaled_temp <- predict(temp_model)
+
+
+ggplot() +
+    ggtitle("Shooting Incidents by Month") +
+    theme(legend.position="bottom") +
+    ggplot2::guides(linetype=ggplot2::guide_legend(title=""), 
+                    color=ggplot2::guide_colourbar(title="")) +
+    ylab("Fraction of annual incidents") +
+    geom_point(data=monthly, mapping=aes(x=month, y=fraction, color=year_num)) +
+    geom_line(data=month_df, mapping=aes(x=month_num, y=predicted, linetype="Sine Model")) +
+    geom_line(data=month_df, mapping=aes(x=month_num, y=scaled_temp, linetype="Avg Temperature"))
+
+```
+::::
+
+:::
+
+
+# Seasonality: Day of week
+
+::: columns
+
+:::: column
+
+Weekly rhythms have a strong influence on shooting incidents; a scaled and
+phase-shifted sine wave fits quite nicely (RMSE \~2 percentage points of
+annual incidents).
+
+There is no immediately-obvious explanation of this pattern, other than the
+incident rates being higher on Fridays and weekends when more social interaction
+is likely to occur.
+
+::::
+
+:::: column
+
+```{r by_day_of_week, dpi=300}
+daily = incidents %>%
+  count(day_of_week=wday(OCCUR_DATE, label=TRUE),
+        day_num=wday(OCCUR_DATE),
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+  mutate(fraction=n/n.total)
+
+sine_day_model <- nls(fraction ~ v_scale*sin(2*pi*day_num/7.0+phase)+offset,
+                      data=daily, start=list(v_scale=1, phase=0, offset=0.1))
+
+day_pred = tibble(day_num=seq(1, 7))
+day_pred$predicted=predict(sine_day_model, newdata=day_pred)
+day_pred$day_of_week = levels(daily$day_of_week)
+
+ggplot() +
+  ggtitle("Shooting Incidents by Day of week") +
+  theme(legend.position="bottom") +
+  ggplot2::guides(shape=ggplot2::guide_legend(title="")) +
+  ylab("Fraction of annual incidents") +
+  geom_point(data=daily, mapping=aes(x=day_of_week, y=fraction, color=year, shape="actual")) +
+  geom_point(data=day_pred, mapping=aes(x=day_num, y=predicted, shape="Sine model", size=2)) +
+  geom_line(data=day_pred, mapping=aes(x=day_num, y=predicted)) +
+  guides(size="none")
+```
+
+::::
+
+:::
+
+# Seasonality: Hour of day
+
+::: columns
+
+:::: column
+
+While not a simple sinusoidal, there is a repeated cycle
+throughout the day, with incidents rarest in the morning hours
+and most common at night until 4am (which is when bars close in NYC).
+
+This aligns with the weekly pattern: shootings happen less
+during typical working hours and days.
+
+::::
+
+:::: column
+
+```{r hour_of_day, dpi=300}
+hour_of_day = incidents %>%
+  count(hour_of_day=hour(OCCUR_TIME),
+        year=floor_date(OCCUR_DATE, "year")) %>%
+  left_join(yearly, by="year", suffix=c("", ".total")) %>%
+  # n.total is the total incidents in the given year
+  mutate(fraction=n/n.total)
+
+hour_of_day %>%
+  ggplot(aes(hour_of_day, fraction, color=year)) +
+    ggtitle("Shooting Incidents by hour of day") +
+    theme(legend.position="bottom") +
+    ylab("Fraction of annual incidents") +
+    geom_point()
+
+```
+::::
+
+:::
+
+
+# Demographics: Victim, By Race
+
+::: columns
+
+:::: column
+
+The victim's race is overwhelmingly
+coded as Black.
+
+::::
+
+:::: column
+
+```{r vic_race, echo=FALSE, dpi=300}
+incidents %>% 
+  count(year=year, VIC_RACE=VIC_RACE) %>%
+  left_join(incidents %>% count(year=year),
+            by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n/n.total) %>%
+  ggplot(aes(year, fraction, color=VIC_RACE)) +
+    ggtitle("Victim Demographics by Race") +
+    ggplot2::theme(
+      legend.text=ggplot2::element_text(size=8),
+      legend.box.margin = margin(6, 6, 6, 6),
+      legend.position="bottom") +
+    ggplot2::guides(color=ggplot2::guide_legend(ncol=2, title="")) +
+    ylab("Fraction of annual incidents") +
+    geom_line() +
+    geom_point()
+```
+::::
+
+:::
+
+# Demographics: Perpetrator, by Race
+
+
+::: columns
+
+:::: column
+
+The same holds true, in almost the same proportions, for
+the perpetrator's race (where known).
+
+::::
+
+:::: column
+
+```{r perp_race, echo=FALSE, dpi=300}
+known_perp <- incidents %>%
+    filter((PERP_RACE != "UNKNOWN") & (PERP_AGE_GROUP != "UNKNOWN"))
+known_perp %>% 
+  count(year=year, PERP_RACE=PERP_RACE) %>%
+  left_join(known_perp %>% count(year=year),
+            by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n/n.total) %>%
+  ggplot(aes(year, fraction, color=PERP_RACE)) +
+    ggtitle("Perpetrator Demographics by Race, where known") +
+    ggplot2::theme(
+      legend.text=ggplot2::element_text(size=8),
+      legend.box.margin = margin(6, 6, 6, 6),
+      legend.position="bottom") +
+    ggplot2::guides(color=ggplot2::guide_legend(ncol=2, title="")) +
+    ylab("Fraction of annual incidents") +
+    geom_line() +
+    geom_point()
+```
+
+::::
+
+:::
+
+# Younger Black males
+
+::: columns
+
+:::: column
+
+We can narrow the data to consider only the combined fractions for victims and
+perpetrators coded as Black males in the 18-24 or 25-44 age groups.
+
+More than half of all shooting incidents involve someone in this demographic
+as victim, and roughly the same proportion as perpetrator (where known).
+
+The entire Black population of NYC is just under a quarter of the city; males
+in this age group would be a still smaller fraction.
+
+::::
+
+:::: column
+
+```{r aggregate_demo, echo=FALSE, dpi=300}
+known_perp %>%
+  count(year, PERP_RACE, PERP_SEX, PERP_AGE_GROUP) %>%
+  left_join(known_perp %>% count(year=year),
+            by="year", suffix=c("", ".total")) %>%
+  mutate(fraction=n/n.total) %>%
+  filter(fraction > 0.15) %>%
+  group_by(year) %>%
+  summarize(perp_fraction=sum(fraction)) %>%
+  left_join(incidents %>%
+    count(year, VIC_RACE, VIC_SEX, VIC_AGE_GROUP) %>%
+    left_join(incidents %>% count(year=year),
+              by="year", suffix=c("", ".total")) %>%
+    mutate(fraction=n/n.total) %>%
+    filter(fraction > 0.15) %>%
+    group_by(year) %>%
+    summarize(vic_fraction=sum(fraction)),
+    by="year") %>%
+  ggplot(aes(x=year)) +
+    ggtitle("Shooting Incidents, Black males age 18-44") +
+    ggplot2::theme(
+      legend.text=ggplot2::element_text(size=8),
+      legend.box.margin = margin(6, 6, 6, 6),
+      legend.position="bottom") +
+    ggplot2::guides(color=ggplot2::guide_legend(ncol=1, title="")) +
+    ylim(0, 1) +
+    ylab("Fraction of Annual Shootings") +
+    geom_point(aes(y=perp_fraction, color="Perpetrator (where known)")) +
+    geom_line(aes(y=perp_fraction, color="Perpetrator (where known)")) +
+    geom_point(aes(y=vic_fraction, color="Victim")) +
+    geom_line(aes(y=vic_fraction, color="Victim")) +
+    geom_hline(aes(yintercept=0.238, color="Black Population"), linetype=2)
+```
+
+::::
+
+:::
+
+# Conclusions - Temporal Conclusions
+
+Despite sharp changes in overall incident counts, there are strong seasonal
+patterns at multiple scales: over the course of a day, a week, and a year
+
+# Conclusions - Demographic Conclusions
+
+The impact of shootings (both as victim and perpetrator) falls wildly
+disproportionately on individuals reported as Black males aged 18-44.
+
+Any strategy or intervention must consider both these temporal and 
+demographic factors or it will be mis-targeted or inefficient.
+
+# A Caution
+
+The demographic concentration of shootings should not be read as *causal*
+but rather as descriptive and correlated. Demographics are correlated with
+many other factors including socio-economic status, education, job opportunities,
+geographic location, historical deprivation etc., which are more likely to
+be actual causation.
+
+# Error and Bias
+
+Finally, we consider the many ways this analysis might be wrong or misleading.
+
+# Error and Bias: Data Source Motivations
+
+The underlying data comes from the NYPD. They are not a neutral party:
+this data may be used to demonstrate their effectiveness, to argue for
+more resources in certain areas, or to support theories of crime and
+victimhood.
+
+# Error and Bias: Data Source Avenues of Bias
+
+Any of these would be a reason to bias the data collection and reporting:
+
+* Skewing demographic data toward desirable patterns
+* More subtly, controlling what is reported as a shooting incident and what is
+  absent altogether
+
+# Error and Bias: Analysis
+
+Beyond the data, the analysis may be flawed, biased or misleading.
+
+* The focus on proportional analysis masks the changing absolute numbers of
+  incidents, which may be a better measure of "cost" in many dimensions
+* There may be important subtleties in who reports data and how, unknown to
+  the analyst. Demographic fields are subjective and vulnerable to misinterpretation.
+
+That said, the patterns reported *seem* to be so strong as to resist most
+small-scale biases or misinterpretations!

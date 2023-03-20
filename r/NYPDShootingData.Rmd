@@ -30,7 +30,6 @@ library(lubridate)
 # my machine, so avoid it.
 conflict_prefer("filter", "dplyr")
 conflict_prefer("lag", "dplyr")
-
 ```
 
 # Overview
@@ -67,17 +66,19 @@ contextualize or suggest possible causal variables:
 * Central Park temperature data from <https://www.weather.gov/media/okx/Climate/CentralPark/DailyAvgTNormals.pdf>
 * Population data from <https://www.census.gov/quickfacts/newyorkcitynewyork>
 
-## Self-link and Source
+## Self-links and Source
 
 This document is derived from an R Markdown notebook, with source available in
 Github repo: <https://github.com/symmatree/data-science/tree/main/r>:
 
-* This document's source code: <https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.Rmd>
-* This document rendered as a PDF: <<https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.pdf>
+* This document: 
+  <https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.Rmd> (source) /
+  [pdf](https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.pdf)
 * A slide deck summarizing the conclusions of this analysis, eliding discussion
-  of the details of data cleaning and other "methods" topics:
-  <https://github.com/symmatree/data-science/raw/main/r/nypd_slices.Rmd> (source) /
-  <https://github.com/symmatree/data-science/raw/main/r/nypd_slices.pptx> (rendered)
+  of the details of data cleaning and other "methods" topics: Source (<https://github.com/symmatree/data-science/raw/main/r/NYPDShootingDataSlides.Rmd>) /
+  [pdf](https://github.com/symmatree/data-science/raw/main/r/NYPDShootingDataSlides.pdf) /
+  [pptx](https://github.com/symmatree/data-science/raw/main/r/NYPDShootingDataSlides.pptx)
+
 
 # Import
 

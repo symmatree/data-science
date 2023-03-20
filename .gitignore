@@ -132,3 +132,6 @@ dmypy.json
 # R local environment
 .RData
 .RHistory
+
+# Let's not redistribute downloaded datasets.
+Data/
