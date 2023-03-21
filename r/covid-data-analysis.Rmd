@@ -17,6 +17,14 @@ knitr::opts_chunk$set(echo = TRUE)
 This report analyses a Johns Hopkins-sourced dataset to examine the correlations
 between COVID-19 impact and socio-economic metrics.
 
+## Self-links and Source
+
+This document is derived from an R Markdown notebook, with source available in
+Github repo: <https://github.com/symmatree/data-science/tree/main/r>:
+
+This document: <https://github.com/symmatree/data-science/raw/main/r/covid-data-analysis.Rmd> (source) /
+[pdf](https://github.com/symmatree/data-science/raw/main/r/covid-data-analysis.pdf)
+
 ## Data Sources
 
 The primary data source for this analysis is from the
