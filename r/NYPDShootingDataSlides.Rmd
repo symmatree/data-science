@@ -3,12 +3,12 @@ title: "New York City Shooting Incidents"
 author: "Seth Porter"
 date: "2023-03-20"
 output:
-  powerpoint_presentation:
-    reference_doc: custom-reference.pptx
   beamer_presentation:
     theme: "Pittsburgh"
     colortheme: "dolphin"
     fonttheme: "structurebold"
+  powerpoint_presentation:
+    reference_doc: custom-reference.pptx
 ---
 
 ```{r setup, include=FALSE}
@@ -76,6 +76,19 @@ lives of both the victim and the shooter in a single action.
 Understanding their patterns is crucial to policy and intervention decisions
 from law enforcement, other city agencies, and non-governmental actors.
 
+::: notes
+
+What are we looking at? Why should you care?
+
+* Shootings end or radically change the lives of both the victim and the shooter.
+* Understanding the patterns to shootings is vital when trying to reduce them
+  or mitigate their effects.
+
+So this is data about a subject that's important to people at both a personal
+and a systemic level.
+
+:::
+
 # Where is the data from?
 
 * Dataset sourced from <https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic>, 
@@ -83,6 +96,13 @@ from law enforcement, other city agencies, and non-governmental actors.
 * "List of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year."
 * "Only valid shooting incidents resulting in an injured victim are included in this
 release."
+
+::: notes
+This is a dataset from the NYPD, with links here to the data and a PDF describing it.
+
+This is a list of every shooting incident that occurred in New York since 2006, where someone was shot and injured.
+(And, it should be pointed out, where that was reported to or discovered by police.)
+:::
 
 # Secondary data sources
 
@@ -92,11 +112,22 @@ contextualize or suggest possible causal variables:
 * Temperature data from <https://www.weather.gov/media/okx/Climate/CentralPark/DailyAvgTNormals.pdf>
 * Population data from <https://www.census.gov/quickfacts/newyorkcitynewyork>
 
+::: notes
+I used some additional data from public sources for temperature and population.
+:::
+
 # Preliminary Cautions
 
-Be cautious; this data is from a law enforcement agency reporting on its own
-jurisdiction, and may have obvious
-as well as unexpected biases or gaps in the collection and reporting process.
+Be cautious; this data is from a agency reporting on its own
+jurisdiction, and may have resulting biases or gaps in the collection,
+characterization, and reporting process.
+
+::: notes
+Before presenting the data, I just want to remind everyone that this is from
+an organization reporting on its own area of responsibility, which is an
+inherent conflict of interest (or rather a family of related conflicts,
+at different levels and in different parts of the organization).
+:::
 
 # Self Links
 
@@ -109,6 +140,11 @@ Github repo: <https://github.com/symmatree/data-science/tree/main/r>
   <https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.Rmd> (source) /
   [pdf](https://github.com/symmatree/data-science/raw/main/r/NYPDShootingData.pdf)
 
+::: notes
+These slides are available on Github, as well as the full analysis
+which gets further into many of these topics including data cleaning.
+:::
+
 # Two Major Approaches
 
 We will consider
@@ -118,10 +154,19 @@ We will consider
 
 in hopes of understanding the patterns and impacts of these incidents.
 
+::: notes
+In this analysis I consider the patterns of these incidents in terms of
+1) time and 2) the demographics of the victims and perpetrators.
+:::
+
 # Data Analysis - Temporal trends
 
 Our first layer of analysis will focus on **when** shootings occur, considering
 both the overall trend and various scales of periodic behavior.
+
+::: notes
+We look first at the time axis, on several different scales.
+:::
 
 # Long-term trends
 
@@ -164,6 +209,15 @@ yearly_with_pred %>%
 ::::
 
 :::
+
+::: notes
+As you see in the chart, an initial roughly-linear trend through 2019 turned
+into a steep rise in 2020, sustained in 2021.
+This two-stage macro behavior dominates everything else. 
+Therefore, for the rest of this presentation, all graphs will be normalized
+to “fraction of the incidents that year” to reveal patterns otherwise masked.
+:::
+
 
 # Seasonality: Month of year
 
@@ -223,6 +277,17 @@ ggplot() +
 
 :::
 
+::: notes
+Turning to variation within a year, we see a strong monthly pattern.
+This can be approximated quite well by a scaled-and-shifted sine wave,
+and more suggestively, by average temperature data for the city.
+
+This suggests, though in no way proves, a connection between temperature,
+behavior, and propensity for shootings.
+
+Note that the fit is in no way perfect; that overshoot in February and
+undershoot in December are notable.
+:::
 
 # Seasonality: Day of week
 
@@ -273,6 +338,15 @@ ggplot() +
 
 :::
 
+::: notes
+We see a strong weekly cycle as well, again fit nicely by a scaled-and-shifted
+sine wave.
+
+Weeks are a purely human phenomena, so the temperature explanation isn't
+relevant here. This pattern is sustained across many years, so there must be
+*some* underlying mechanism.
+:::
+
 # Seasonality: Hour of day
 
 ::: columns
@@ -310,6 +384,18 @@ hour_of_day %>%
 
 :::
 
+::: notes
+The times of day when shootings occur are also highly structured. Not a sine
+wave, but a tightly repeating pattern across the years.
+
+One feature of this chart can likely be explained by the fact that bars close
+at 4am in New York.
+:::
+
+# Conclusions - Temporal Conclusions
+
+Despite sharp changes in overall incident counts, there are strong seasonal
+patterns at multiple scales: over the course of a day, a week, and a year
 
 # Demographics: Victim, By Race
 
@@ -318,7 +404,8 @@ hour_of_day %>%
 :::: column
 
 The victim's race is overwhelmingly
-coded as Black.
+coded as Black, disproportionate to the Black
+share of the overall city population.
 
 ::::
 
@@ -339,10 +426,17 @@ incidents %>%
     ggplot2::guides(color=ggplot2::guide_legend(ncol=2, title="")) +
     ylab("Fraction of annual incidents") +
     geom_line() +
-    geom_point()
+    geom_point() +
+    geom_hline(aes(yintercept=0.238, color="Black Population (fraction of city)"), linetype=2)
 ```
 ::::
 
+:::
+
+
+::: notes
+Turning to the demographics of the people involved, we start with the race of
+the victim.
 :::
 
 # Demographics: Perpetrator, by Race
@@ -353,7 +447,7 @@ incidents %>%
 :::: column
 
 The same holds true, in almost the same proportions, for
-the perpetrator's race (where known).
+the perpetrator's race (where known), again disproportionately so.
 
 ::::
 
@@ -376,7 +470,8 @@ known_perp %>%
     ggplot2::guides(color=ggplot2::guide_legend(ncol=2, title="")) +
     ylab("Fraction of annual incidents") +
     geom_line() +
-    geom_point()
+    geom_point() +
+    geom_hline(aes(yintercept=0.238, color="Black Population (fraction of city)"), linetype=2)
 ```
 
 ::::
@@ -395,8 +490,9 @@ perpetrators coded as Black males in the 18-24 or 25-44 age groups.
 More than half of all shooting incidents involve someone in this demographic
 as victim, and roughly the same proportion as perpetrator (where known).
 
-The entire Black population of NYC is just under a quarter of the city; males
-in this age group would be a still smaller fraction.
+The *entire* Black population of NYC is just under a quarter of the city, so
+the corresponding line is an overestimate of the fraction of Black males in 
+this age group.
 
 ::::
 
@@ -433,17 +529,12 @@ known_perp %>%
     geom_line(aes(y=perp_fraction, color="Perpetrator (where known)")) +
     geom_point(aes(y=vic_fraction, color="Victim")) +
     geom_line(aes(y=vic_fraction, color="Victim")) +
-    geom_hline(aes(yintercept=0.238, color="Black Population"), linetype=2)
+    geom_hline(aes(yintercept=0.238, color="Entire Black Population (fraction of city)"), linetype=2)
 ```
 
 ::::
 
 :::
-
-# Conclusions - Temporal Conclusions
-
-Despite sharp changes in overall incident counts, there are strong seasonal
-patterns at multiple scales: over the course of a day, a week, and a year
 
 # Conclusions - Demographic Conclusions
 
